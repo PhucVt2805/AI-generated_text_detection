@@ -1,0 +1,8 @@
+peft
+numpy
+torch
+polars
+datasets
+bitsandbytes
+scikit-learn
+git+https://github.com/huggingface/transformers.git
