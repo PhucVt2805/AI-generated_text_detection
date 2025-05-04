@@ -1,1 +1,0 @@
-# AI-generated_text_detection
