@@ -1,0 +1,8 @@
+__pycache__/
+data/
+logs/
+pretrained_models/
+results/
+venv/
+/.env
+/test.py

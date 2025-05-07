@@ -1,18 +1,20 @@
+from functools import cache
 import os
 import torch
-from log_config import logger
+from config.log_config import logger
 import numpy as np
 from datasets import Dataset, ClassLabel, load_dataset
 from peft import LoraConfig, get_peft_model
-from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
+from sklearn.metrics import f1_score, accuracy_score
+from src.utils import check_compute_dtype
 from transformers import AutoTokenizer, BitsAndBytesConfig, AutoModelForSequenceClassification, TrainingArguments, Trainer
+import traceback
 
 MODEL_TARGET_LAYER = {
     "microsoft/deberta-v3-large": ["query_proj", "key_proj", "value_proj", "dense"],
     "roberta-large": ["query", "key", "value", "dense"],
     "distilbert-base-uncased": ["q_lin", "k_lin", "v_lin", "out_lin", "lin1", "lin2"],
     }
-
 
 def compute_metrics(eval_pred):
     """
@@ -37,20 +39,9 @@ def compute_metrics(eval_pred):
                 'acc': The accuracy score calculated using `sklearn.metrics.accuracy_score`.
     """
     logit, labels = eval_pred
-    # Apply argmax to get the predicted class index for each sample
     predictions = np.argmax(logit, axis=-1)
-
-    # Compute weighted F1 score
-    f1 = f1_score(labels, predictions, average="weighted")
-
-    # Compute accuracy score
-    acc = accuracy_score(labels, predictions)
-
-    # Return metrics in a dictionary
     return {
         'accuracy': accuracy_score(labels, predictions),
-        'precision': precision_score(labels, predictions, average='weighted'),
-        'recall': recall_score(labels, predictions, average='weighted'),
         'f1': f1_score(labels, predictions, average='weighted'),
     }
 
@@ -94,8 +85,13 @@ def tokenize_function(examples, tokenizer, max_length=512):
 
 def train(
         pretrained_model_name_or_path: str,
-        data_path: str,
-        output_dir: str,
+        train_data,
+        train_labels,
+        val_data,
+        val_labels,
+        cache_dir: str = './pretrained_models',
+        output_dir: str = './results',
+        use_4bit_quantization: bool = False,
         num_train_epochs: int = 3,
         batch_size: int = 8,
         learning_rate: float = 5e-5,
@@ -116,7 +112,7 @@ def train(
 
     Args:
         pretrained_model_name_or_path (str): Path or name of the pretrained model
-        data_path (str): Path to the dataset file (CSV, JSON, etc.) containing the training and validation data with columns=['data', 'label'].
+        data_path (str): Path to the data file (CSV, JSON, etc.) containing the data with columns=[data, label].
         output_dir (str): Directory to save the training results (checkpoint, final model).
         num_train_epochs (int, optional): Number of training epochs. Default is 3.
         batch_size (int, optional): Batch size for training and evaluation. Default is 8.
@@ -135,63 +131,44 @@ def train(
         None: The function saves the trained model and evaluation results to the specified output directory.
     """
 
-    os.environ['TRANSFORMERS_CACHE'] = './model'
-
-    dataset = load_dataset(data_path.split('.')[-1], data_files=data_path)
-    split = dataset['train'].train_test_split(test_size=0.2)
-    train_data = split['train']['data']
-    train_labels = split['train']['label']
-    val_data = split['test']['data']
-    val_labels = split['test']['label']
-    logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_data)} và val={len(val_data)}')
+    cache_dir = os.path.join(os.getcwd(), cache_dir)
+    output_dir = os.path.join(os.getcwd(), output_dir)
 
     # 1. Choose the dtype that matches your hardware
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        if torch.cuda.is_bf16_supported():
-            compute_dtype = torch.bfloat16
-            use_mixed_precision = True
-            use_4bit_quantization = True
-            logger.info(f'{os.path.basename(__file__)}: GPU CUDA hỗ trợ BF16')
-        else:
-            compute_dtype = torch.float16
-            use_mixed_precision = True
-            use_4bit_quantization = True
-            logger.info(f'{os.path.basename(__file__)}: GPU không hỗ trợ BF16, sử dụng FP16')
-        quantization = True
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        compute_dtype = torch.float32
-        logger.info(f'{os.path.basename(__file__)}: GPU MPS sử dụng FP32')
-        quantization = False
-        use_4bit_quantization = False
-        use_mixed_precision = False
+    compute_dtype = check_compute_dtype()
+    if compute_dtype == torch.float32:
+        mixed_precision = "no"
+        logger.info(f'{os.path.basename(__file__)}: Không sử dụng mixed precision')
+    elif compute_dtype == torch.float16:
+        mixed_precision = "fp16"
+        logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là fp16')
+    elif compute_dtype == torch.bfloat16:
+        mixed_precision = "bf16"
+        logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là bf16')
     else:
-        device = torch.device("cpu")
-        compute_dtype = torch.float32
-        logger.info(f'{os.path.basename(__file__)}: Không có GPU, sử dụng CPU')
-        quantization = False
-        use_4bit_quantization = False
-        use_mixed_precision = False
+        mixed_precision = "no" # Trường hợp mặc định nếu không xác định được
+        logger.info(f'{os.path.basename(__file__)}: Không hỗ trợ mixed precision cho {compute_dtype}')
 
 
     # 2. Setup tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=pretrained_model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=pretrained_model_name_or_path, cache_dir=cache_dir)
     if tokenizer.pad_token is None:
         if tokenizer.eos_token:
             tokenizer.pad_token = tokenizer.eos_token
         else:
-            tokenizer.add_special_tokens({"pad_token": "[PAD]"})
-            logger.info(f'{os.path.basename(__file__)}: Đã thêm pad_token vào tokenizer')
+            if "[PAD]" not in tokenizer.vocab:
+                tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+            else:
+                tokenizer.pad_token = "[PAD]"
     logger.info(f'{os.path.basename(__file__)}: Đã load Tokenizer từ {pretrained_model_name_or_path}')
     
     bnb_config = None
     model_kwargs = {
         'num_labels': num_labels,
-        'device_map': "auto",
+        'torch_dtype': compute_dtype
     }
 
-    if use_4bit_quantization and quantization:
+    if use_4bit_quantization:
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -200,29 +177,30 @@ def train(
             llm_int8_threshold=6.0
         )
         model_kwargs['quantization_config'] = bnb_config
-        model_kwargs['torch_dtype'] = compute_dtype
         logger.info(f'{os.path.basename(__file__)}: Đã tạo và áp dụng cấu hình Bits and Bytes cho 4bit quantization với bnb_4bit_compute_dtype={compute_dtype}')
-    else:
-        if use_mixed_precision and device.type != "cpu":
-            model_kwargs['torch_dtype'] = compute_dtype
-            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập torch_dtype cho mô hình là {compute_dtype} cho mixed precision.')
-        else:
-            model_kwargs['torch_dtype'] = compute_dtype
-            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập torch_dtype cho mô hình là float32')
-    
+
+
     # 3. Load model
     model = AutoModelForSequenceClassification.from_pretrained(
         pretrained_model_name_or_path,
+        cache_dir=cache_dir,
         **model_kwargs,
     )
-    logger.info(f'{os.path.basename(__file__)}: Đã tải mô hình {pretrained_model_name_or_path} với cấu hình 4bit quantization')
+    model
+    if use_4bit_quantization:
+        logger.info(f'{os.path.basename(__file__)}: Đã tải mô hình {pretrained_model_name_or_path} với cấu hình 4bit quantization')
+    else:
+        logger.info(f'{os.path.basename(__file__)}: Đã tải mô hình {pretrained_model_name_or_path} không dùng 4bit quantization')
 
     current_model_vocab_size = model.get_input_embeddings().num_embeddings
     if current_model_vocab_size < len(tokenizer):
         model.resize_token_embeddings(len(tokenizer))
-        logger.info(f'{os.path.basename(__file__)}: Đã điều chỉnh kích thước embedding đầu vào của mô hình từ {current_model_vocab_size} thành {len(tokenizer)} cho phù hợp với tokenizer')
+        logger.info(f'{os.path.basename(__file__)}: Đã điều chỉnh kích thước embedding đầu vào của mô hình từ {current_model_vocab_size} thành {len(tokenizer)} cho phù hợp với tokenizer.')
     elif current_model_vocab_size > len(tokenizer):
-        logger.warning(f'{os.path.basename(__file__)}: Kích thước embedding đầu vào của mô hình ({current_model_vocab_size}) lớn hơn kích thước từ vựng của tokenizer ({len(tokenizer)}).')
+         logger.warning(f'{os.path.basename(__file__)}: Kích thước embedding đầu vào của mô hình ({current_model_vocab_size}) lớn hơn kích thước từ vựng của tokenizer ({len(tokenizer)}). Điều này thường không phải là vấn đề nhưng cần lưu ý.')
+    else:
+        logger.info(f'{os.path.basename(__file__)}: Kích thước embedding của mô hình và tokenizer khớp nhau ({current_model_vocab_size}).')
+
 
     # 4. LoRA configuration
     target_modules = None
@@ -246,49 +224,46 @@ def train(
 
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+    if torch.cuda.is_available():
+        logger.info(f'{os.path.basename(__file__)}: VRAM đã sử dụng sau khi tải mô hình và áp dụng LoRA: {torch.cuda.memory_allocated() / 1024**3:.2f}')
 
     # 5. Dataset Creation and Tokenization
-    train_datasets = Dataset.from_dict({"data": train_data, "label": train_labels})
-    val_datasets = Dataset.from_dict({"data": val_data, "label": val_labels})
+    train_datasets = Dataset.from_dict({'data': train_data, 'label': train_labels})
+    val_datasets = Dataset.from_dict({'data': val_data, 'label': val_labels})
     logger.info(f'{os.path.basename(__file__)}: Đã tạo tập dữ liệu huấn luyện ({len(train_datasets)} mẫu) và kiểm tra ({len(val_datasets)} mẫu) từ danh sách văn bản và nhãn')
 
-    tokenizer_train = train_datasets.map(
-        tokenize_function,
-        fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
-        batched=True,
-        remove_columns=["data"],
-        desc="Tokenizing train dataset"
-    )
+    try:
+        tokenizer_train = train_datasets.map(
+            tokenize_function,
+            fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
+            batched=True,
+            remove_columns=['data'],
+            desc="Tokenizing train dataset"
+        )
 
-    tokenizer_val = val_datasets.map(
-        tokenize_function,
-        fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
-        batched=True,
-        remove_columns=["data"],
-        desc="Tokenizing validation dataset"
-    )
-    logger.info(f'{os.path.basename(__file__)}: Đã token hóa tập dữ liệu huấn luyện và kiểm tra')
+        tokenizer_val = val_datasets.map(
+            tokenize_function,
+            fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
+            batched=True,
+            remove_columns=['data'],
+            desc="Tokenizing validation dataset"
+        )
+        logger.info(f'{os.path.basename(__file__)}: Đã token hóa tập dữ liệu huấn luyện và kiểm tra')
 
-    tokenizer_train = tokenizer_train.cast_column("label", ClassLabel(num_classes=num_labels))
-    tokenizer_val = tokenizer_val.cast_column("label", ClassLabel(num_classes=num_labels))
-    logger.info(f'{os.path.basename(__file__)}: Đã ép kiểu cột "label" sang ClassLabel.')
+        tokenizer_train = tokenizer_train.cast_column('label', ClassLabel(num_classes=num_labels))
+        tokenizer_val = tokenizer_val.cast_column('label', ClassLabel(num_classes=num_labels))
+        logger.info(f'{os.path.basename(__file__)}: Đã ép kiểu cột "label" sang ClassLabel.')
 
-    tokenizer_train.set_format("torch")
-    tokenizer_val.set_format("torch")
-    logger.info(f'{os.path.basename(__file__)}: Đã thiết lập định dạng torch cho tập dữ liệu huấn luyện và kiểm tra')
+        tokenizer_train.set_format("torch")
+        tokenizer_val.set_format("torch")
+        logger.info(f'{os.path.basename(__file__)}: Đã thiết lập định dạng torch cho tập dữ liệu huấn luyện và kiểm tra')
+    
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Lỗi khi token hóa tập dữ liệu: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e
 
     # 6. Training Arguments Setup
-    if use_mixed_precision:
-        if compute_dtype == torch.bfloat16:
-            mixed_precision = "bf16"
-            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là bf16')
-        elif compute_dtype == torch.float16:
-            mixed_precision = "fp16"
-            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là fp16')
-    else:
-        mixed_precision = "no"
-        logger.info(f'{os.path.basename(__file__)}: Không sử dụng mixed precision')
-
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True, #Ghi đè lên thư mục đầu ra nếu nó đã tồn tại
@@ -304,17 +279,19 @@ def train(
         logging_dir=os.path.join(output_dir, "logs"), #Thư mục để lưu trữ các tệp log
         logging_strategy="epoch", #Chiến lược ghi log
         save_strategy="steps", #Chiến lược lưu mô hình
-        save_steps=500, #Số bước để lưu mô hình
+        save_steps=50000, #Số bước để lưu mô hình
         gradient_checkpointing=use_gradient_checkpointing, #Bật gradient checkpointing
         eval_strategy="steps", #Chiến lược đánh giá
-        eval_steps=500, #Số bước để đánh giá mô hình
+        eval_steps=5000, #Số bước để đánh giá mô hình
         load_best_model_at_end=True, #Tải mô hình tốt nhất ở cuối quá trình huấn luyện
         metric_for_best_model="eval_f1", #Chỉ số để xác định mô hình tốt nhất
         greater_is_better=True, #Chỉ số lớn hơn là tốt hơn
         fp16=mixed_precision == "fp16", #Sử dụng fp16 nếu mixed_precision là "fp16"
         bf16=mixed_precision == "bf16", #Sử dụng bf16 nếu mixed_precision là "bf16"
         report_to="none", #Không báo cáo đến bất kỳ dịch vụ nào
-        label_names=["label"], #Tên cột nhãn
+        label_names=['label'], #Tên cột nhãn
+        dataloader_num_workers=os.cpu_count() // 2 if os.cpu_count() else 0, # Sử dụng một nửa số core CPU cho dataloader
+        remove_unused_columns=True #Loại bỏ các cột không sử dụng
     )
 
     # 7. Trainer Initialization
@@ -324,21 +301,79 @@ def train(
         train_dataset=tokenizer_train,
         eval_dataset=tokenizer_val,
         compute_metrics=compute_metrics,
-        processing_class=tokenizer
     )
-    logger.info(f'{os.path.basename(__file__)}: Đã tạo Trainer với các tham số huấn luyện và tập dữ liệu đã được token hóa')
+    logger.info(f'{os.path.basename(__file__)}: Đã tạo Trainer với TrainingArguments = {training_args}')
 
     # 8. Training
     logger.info(f'{os.path.basename(__file__)}: Bắt đầu quá trình huấn luyện mô hình')
-    train_result = trainer.train()
-    logger.info(f'{os.path.basename(__file__)}: Đã hoàn thành quá trình huấn luyện mô hình')
-    trainer.log_metrics("train", train_result.metrics)
-    trainer.save_model(output_dir)
-    logger.info(f'{os.path.basename(__file__)}: Đã lưu mô hình tại {output_dir}')
-    
-    # 9. Evaluation
-    logger.info(f'{os.path.basename(__file__)}: Bắt đầu quá trình đánh giá mô hình')
-    eval_result = trainer.evaluate()
-    logger.info(f'{os.path.basename(__file__)}: Đã hoàn thành quá trình đánh giá mô hình\nEvaluation metrics: {eval_result}')
+    try:
+        train_result = trainer.train()
+        logger.info(f'{os.path.basename(__file__)}: Đã hoàn thành quá trình huấn luyện mô hình')
+        trainer.log_metrics("train", train_result.metrics)
 
-    return output_dir
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Lỗi khi huấn luyện mô hình: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e
+
+    # 10. Evaluation
+    logger.info(f'{os.path.basename(__file__)}: Bắt đầu quá trình đánh giá mô hình')
+    try:
+        eval_result = trainer.evaluate()
+        logger.info(f'{os.path.basename(__file__)}: Đã hoàn thành quá trình đánh giá mô hình')
+        trainer.log_metrics("eval", eval_result) # Trainer tự log metrics cuối cùng
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Lỗi khi đánh giá mô hình: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e
+
+    # 11. Save the model (PEFT adapters and tokenizer)
+    try:
+        trainer.save_model(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        logger.info(f'{os.path.basename(__file__)}: Đã lưu mô hình (adapters) và tokenizer tại {output_dir}')
+        return output_dir
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Lỗi khi lưu mô hình và tokenizer tại {output_dir}: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e
+
+if __name__ == "__main__":
+    model_name = 'distilbert-base-uncased'
+    data_path = 'data/test.parquet'
+    model_output_dir = 'results'
+    try:
+        dataset = load_dataset(data_path.split('.')[-1], data_files=data_path)
+        split = dataset['train'].train_test_split(test_size=0.1)
+        train_data = split['train'][split.column_names['train'][0]]
+        train_labels = split['train'][split.column_names['train'][1]]
+        val_data = split['test'][split.column_names['test'][0]]
+        val_labels = split['test'][split.column_names['test'][1]]
+        logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_data)} và val={len(val_data)}')
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Lỗi khi tải tập dữ liệu từ {data_path}: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e
+    try:
+        path_model = train(
+            pretrained_model_name_or_path=model_name,
+            train_data=train_data,
+            train_labels=train_labels,
+            val_data=val_data,
+            val_labels=val_labels,
+            output_dir=model_output_dir,
+            num_train_epochs=1,
+            batch_size=8,
+            use_4bit_quantization=False
+        )
+
+        if path_model:
+            logger.info(f'{os.path.basename(__file__)}: Đã lưu mô hình {model_name} thành công tại {path_model}')
+        else:
+            logger.error(f'{os.path.basename(__file__)}: Huấn luyện mô hình {model_name} thất bại.')
+            
+
+    except Exception as e:
+        logger.error(f'{os.path.basename(__file__)}: Quá trình huấn luyện mô hình {model_name} gặp lỗi: {e}')
+        logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
+        raise e

@@ -1,8 +1,9 @@
 peft
 numpy
-torch
-polars
 datasets
-bitsandbytes
+protobuf
+tiktoken
+accelerate
 scikit-learn
-git+https://github.com/huggingface/transformers.git
+transformers
+sentencepiece
