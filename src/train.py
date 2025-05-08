@@ -85,10 +85,8 @@ def tokenize_function(examples, tokenizer, max_length=512):
 
 def train(
         pretrained_model_name_or_path: str,
-        train_data,
-        train_labels,
-        val_data,
-        val_labels,
+        train_datasets,
+        val_datasets,
         cache_dir: str = './pretrained_models',
         output_dir: str = './results',
         use_4bit_quantization: bool = False,
@@ -228,16 +226,12 @@ def train(
         logger.info(f'{os.path.basename(__file__)}: VRAM đã sử dụng sau khi tải mô hình và áp dụng LoRA: {torch.cuda.memory_allocated() / 1024**3:.2f}')
 
     # 5. Dataset Creation and Tokenization
-    train_datasets = Dataset.from_dict({'data': train_data, 'label': train_labels})
-    val_datasets = Dataset.from_dict({'data': val_data, 'label': val_labels})
-    logger.info(f'{os.path.basename(__file__)}: Đã tạo tập dữ liệu huấn luyện ({len(train_datasets)} mẫu) và kiểm tra ({len(val_datasets)} mẫu) từ danh sách văn bản và nhãn')
-
     try:
         tokenizer_train = train_datasets.map(
             tokenize_function,
             fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
             batched=True,
-            remove_columns=['data'],
+            remove_columns=['data', 'label'],
             desc="Tokenizing train dataset"
         )
 
@@ -245,13 +239,13 @@ def train(
             tokenize_function,
             fn_kwargs={"tokenizer": tokenizer, "max_length": max_length},
             batched=True,
-            remove_columns=['data'],
+            remove_columns=['data', 'label'],
             desc="Tokenizing validation dataset"
         )
         logger.info(f'{os.path.basename(__file__)}: Đã token hóa tập dữ liệu huấn luyện và kiểm tra')
 
-        tokenizer_train = tokenizer_train.cast_column('label', ClassLabel(num_classes=num_labels))
-        tokenizer_val = tokenizer_val.cast_column('label', ClassLabel(num_classes=num_labels))
+        tokenizer_train = tokenizer_train.cast_column('labels', ClassLabel(num_classes=num_labels))
+        tokenizer_val = tokenizer_val.cast_column('labels', ClassLabel(num_classes=num_labels))
         logger.info(f'{os.path.basename(__file__)}: Đã ép kiểu cột "label" sang ClassLabel.')
 
         tokenizer_train.set_format("torch")
@@ -289,7 +283,7 @@ def train(
         fp16=mixed_precision == "fp16", #Sử dụng fp16 nếu mixed_precision là "fp16"
         bf16=mixed_precision == "bf16", #Sử dụng bf16 nếu mixed_precision là "bf16"
         report_to="none", #Không báo cáo đến bất kỳ dịch vụ nào
-        label_names=['label'], #Tên cột nhãn
+        label_names=['labels'], #Tên cột nhãn
         dataloader_num_workers=os.cpu_count() // 2 if os.cpu_count() else 0, # Sử dụng một nửa số core CPU cho dataloader
         remove_unused_columns=True #Loại bỏ các cột không sử dụng
     )
@@ -345,11 +339,9 @@ if __name__ == "__main__":
     try:
         dataset = load_dataset(data_path.split('.')[-1], data_files=data_path)
         split = dataset['train'].train_test_split(test_size=0.1)
-        train_data = split['train'][split.column_names['train'][0]]
-        train_labels = split['train'][split.column_names['train'][1]]
-        val_data = split['test'][split.column_names['test'][0]]
-        val_labels = split['test'][split.column_names['test'][1]]
-        logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_data)} và val={len(val_data)}')
+        train_datasets = split['train']
+        val_datasets = split['test']
+        logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_datasets)} và val={len(val_datasets)}')
     except Exception as e:
         logger.error(f'{os.path.basename(__file__)}: Lỗi khi tải tập dữ liệu từ {data_path}: {e}')
         logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
@@ -357,10 +349,8 @@ if __name__ == "__main__":
     try:
         path_model = train(
             pretrained_model_name_or_path=model_name,
-            train_data=train_data,
-            train_labels=train_labels,
-            val_data=val_data,
-            val_labels=val_labels,
+            train_datasets=train_datasets,
+            val_datasets=val_datasets,
             output_dir=model_output_dir,
             num_train_epochs=1,
             batch_size=8,

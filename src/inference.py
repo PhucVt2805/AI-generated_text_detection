@@ -14,7 +14,18 @@ def load_model(
         use_4bit_quantization: bool = False,
     ):
     """
-    Tải mô hình base và áp dụng PEFT adapters đã fine-tune từ thư mục.
+    Load the base model and apply the fine-tuned PEFT adapters from the folder.
+
+    Args:
+        model_dir (str): Path to the directory where the fine-tuned model is stored.
+        model_name (str): Name of the base model (required for loading the base model).
+        cache_dir (str): Path to the directory where the base model is cached.
+        use_4bit_quantization (bool): Whether to use 4bit quantization when loading the model (must match when training).
+
+    Returns:
+        model (transformers.PreTrainedModel): Loaded model with PEFT adapters applied.
+        tokenizer (transformers.PreTrainedTokenizer): Tokenizer for the model.
+
     """
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, cache_dir=cache_dir, use_fast=True, local_files_only=True)
@@ -83,8 +94,16 @@ def load_model(
 
 def predict_single_model(text: str, model, tokenizer, max_length: int = 512):
     """
-    Thực hiện inference cho một văn bản trên một mô hình đã tải.
-    Trả về xác suất cho từng lớp.
+    Perform inference for a document on a loaded model. Returns probabilities for each class.
+    
+    Args:
+        text (str): Text to predict.
+        model (transformers.PreTrainedModel): Loaded model.
+        tokenizer (transformers.PreTrainedTokenizer): Tokenizer for the model.
+        max_length (int): Maximum length when tokenizing.
+
+    Returns:
+        np.ndarray: Probabilities for each class.
     """
     try:
         inputs = tokenizer(
@@ -112,21 +131,21 @@ def predict_single_model(text: str, model, tokenizer, max_length: int = 512):
 
 def ensemble_predict(model_dirs: list[str], base_model_names: list[str], texts: list[str], max_length: int = 512, use_4bit_quantization: bool = True):
     """
-    Thực hiện dự đoán sử dụng kỹ thuật Ensemble (trung bình xác suất) trên nhiều mô hình.
+    Perform predictions using Ensemble (average probability) technique on multiple models.
 
     Args:
-        model_dirs (list[str]): Danh sách các đường dẫn tới thư mục lưu trữ mô hình đã fine-tune.
-        base_model_names (list[str]): Danh sách tên các mô hình base tương ứng (cần cho việc tải mô hình base).
-        texts (list[str]): Danh sách các văn bản cần dự đoán.
-        max_length (int): Chiều dài tối đa khi tokenization.
-        use_4bit_quantization (bool): Có sử dụng 4bit quantization khi tải mô hình không (phải khớp với lúc train).
+        model_dirs (list[str]): List of paths to the directory where the fine-tuned model is stored.
+        base_model_names (list[str]): List of names of the corresponding base models (required for loading the base model).
+        texts (list[str]): List of texts to predict.
+        max_length (int): Maximum length when tokenizing.
+        use_4bit_quantization (bool): Whether to use 4bit quantization when loading the model (must match when training).
 
     Returns:
-        list[int]: Danh sách các dự đoán cuối cùng (0 hoặc 1) cho mỗi văn bản.
-        list[np.ndarray]: Danh sách xác suất trung bình cho mỗi văn bản.
+        list[int]: List of final predictions (0 or 1) for each text.
+        list[np.ndarray]: List of average probabilities for each text.
     """
     if len(model_dirs) != len(base_model_names):
-        logger.error("Số lượng thư mục mô hình và tên mô hình base phải khớp nhau.")
+        logger.error(f"{os.path.basename(__file__)}: Số lượng thư mục mô hình và tên mô hình base phải khớp nhau.")
         return [], []
 
     loaded_models = []
@@ -138,37 +157,35 @@ def ensemble_predict(model_dirs: list[str], base_model_names: list[str], texts: 
         if model and tokenizer:
             loaded_models.append((model, tokenizer, base_name)) # Lưu cả tên base model để dễ debug
         else:
-            logger.warning(f"Không thể tải mô hình từ {model_dir}. Bỏ qua mô hình này trong ensemble.")
+            logger.warning(f"{os.path.basename(__file__)}: Không thể tải mô hình từ {model_dir}. Bỏ qua mô hình này trong ensemble.")
 
     if not loaded_models:
-        logger.error("Không có mô hình nào được tải thành công. Không thể thực hiện ensemble.")
+        logger.error(f"{os.path.basename(__file__)}: Không có mô hình nào được tải thành công. Không thể thực hiện ensemble.")
         return [], []
 
-    logger.info(f"Đã tải thành công {len(loaded_models)} mô hình cho ensemble.")
+    logger.info(f"{os.path.basename(__file__)}: Đã tải thành công {len(loaded_models)} mô hình cho ensemble.")
 
     all_texts_avg_probs = []
 
     for i, text in enumerate(texts):
-        logger.info(f"Đang xử lý văn bản {i+1}/{len(texts)}: '{text[:100]}...'")
-        model_probs = [] # Lưu xác suất từ mỗi mô hình cho văn bản hiện tại
+        logger.info(f"{os.path.basename(__file__)}: Đang xử lý văn bản {i+1}/{len(texts)}: '{text[:100]}...'")
+        model_probs = []
 
         for model, tokenizer, model_name in loaded_models:
             probs = predict_single_model(text, model, tokenizer, max_length)
             if probs is not None:
                 model_probs.append(probs)
-                logger.info(f"- Mô hình {model_name}: Xác suất = {probs}")
+                logger.info(f"{os.path.basename(__file__)}: - Mô hình {model_name}: Xác suất = {probs}")
 
         if not model_probs:
-            logger.warning(f"Không nhận được dự đoán từ bất kỳ mô hình nào cho văn bản '{text[:100]}...'. Bỏ qua văn bản này.")
-            all_texts_avg_probs.append(np.array([0.5, 0.5])) # Hoặc giá trị mặc định khác
+            logger.warning(f"{os.path.basename(__file__)}: Không nhận được dự đoán từ bất kỳ mô hình nào cho văn bản '{text[:100]}...'. Bỏ qua văn bản này.")
+            all_texts_avg_probs.append(np.array([0.5, 0.5]))
             continue
 
-        # Tính trung bình cộng xác suất từ các mô hình
         averaged_probs = np.mean(model_probs, axis=0)
         all_texts_avg_probs.append(averaged_probs)
-        logger.info(f"-> Kết quả Ensemble (xác suất trung bình): {averaged_probs}")
+        logger.info(f"{os.path.basename(__file__)}: -> Kết quả Ensemble (xác suất trung bình): {averaged_probs}")
 
-    # Xác định dự đoán cuối cùng dựa trên xác suất trung bình
     final_predictions = [np.argmax(probs) for probs in all_texts_avg_probs]
 
     return final_predictions, all_texts_avg_probs
@@ -190,7 +207,7 @@ if __name__ == "__main__":
     if predictions:
         predictions_int = [int(p) for p in predictions]
         for text, prediction, probs in zip(example_data, predictions_int, avg_probabilities):
-            label_text = "Tích cực" if prediction == 1 else ("Tiêu cực" if prediction == 0 else "Không xác định")
+            label_text = "AI tạo ra" if prediction == 1 else ("Con người tạo ra" if prediction == 0 else "Không xác định")
             print(f"Văn bản: '{text}'")
             print(f"  Dự đoán cuối cùng: {prediction} ({label_text})")
             print(f"  Xác suất trung bình (Lớp 0, Lớp 1): {probs}")

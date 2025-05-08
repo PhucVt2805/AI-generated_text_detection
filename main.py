@@ -13,11 +13,9 @@ def main(data_path):
     try:
         dataset = load_dataset(data_path.split('.')[-1], data_files=data_path)
         split = dataset['train'].train_test_split(test_size=0.1)
-        train_data = split['train'][split.column_names['train'][0]]
-        train_labels = split['train'][split.column_names['train'][1]]
-        val_data = split['test'][split.column_names['test'][0]]
-        val_labels = split['test'][split.column_names['test'][1]]
-        logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_data)} và val={len(val_data)}')
+        train_datasets = split['train']
+        val_datasets = split['test']
+        logger.info(f'{os.path.basename(__file__)}: Đã tải tập dữ liệu từ {data_path} và chia thành tập train={len(train_datasets)} và val={len(val_datasets)}')
     except Exception as e:
         logger.error(f'{os.path.basename(__file__)}: Lỗi khi tải tập dữ liệu từ {data_path}: {e}')
         logger.error(f'{os.path.basename(__file__)}: Traceback: {traceback.format_exc()}')
@@ -35,10 +33,8 @@ def main(data_path):
         try:
             path_model = train(
                 pretrained_model_name_or_path=model_name,
-                train_data=train_data,
-                train_labels=train_labels,
-                val_data=val_data,
-                val_labels=val_labels,
+                train_datasets=train_datasets,
+                val_datasets=val_datasets,
                 output_dir=model_output_dir,
                 num_train_epochs=1,
                 batch_size=2,
@@ -46,7 +42,6 @@ def main(data_path):
             )
 
             if path_model:
-                print(f"Đã lưu mô hình {model_name} thành công tại {path_model}")
                 logger.info(f'{os.path.basename(__file__)}: Đã lưu mô hình {model_name} thành công tại {path_model}')
                 trained_model_dirs.append(path_model)
             else:
@@ -58,9 +53,11 @@ def main(data_path):
 
     if len(trained_model_dirs) < len(models):
         logger.warning(f"{os.path.basename(__file__)}: Không phải tất cả các mô hình đều được huấn luyện thành công.Chỉ có {', '.join(trained_model_dirs)} mô hình sẽ được sử dụng cho ensemble.")
-
+    else:
+        logger.info(f"{os.path.basename(__file__)}: Tất cả các mô hình đều được huấn luyện thành công.")
+    
      # --- Bước 2: Thực hiện Ensemble Inference ---
-    logger.info(f"{os.path.basename(__file__)}:\n--- Bắt đầu quá trình Ensemble Inference ---")
+    logger.info(f"{os.path.basename(__file__)}:\n--- Bắt đầu quá trình Ensemble Inference ---\n")
 
     texts_to_predict = [
         "Đây là một ví dụ văn bản tích cực cho việc phát triển mã nguồn mở.",
@@ -82,11 +79,11 @@ def main(data_path):
         use_4bit_quantization=False
     )
 
-    print("\n--- Kết quả dự đoán Ensemble ---")
+    print("\n--- Kết quả dự đoán Ensemble ---\n")
     if predictions:
         predictions_int = [int(p) for p in predictions]
         for text, prediction, probs in zip(texts_to_predict, predictions_int, avg_probabilities):
-            label_text = "Tích cực" if prediction == 1 else ("Tiêu cực" if prediction == 0 else "Không xác định")
+            label_text = "AI tạo ra" if prediction == 1 else ("Con người tạo ra" if prediction == 0 else "Không xác định")
             print(f"Văn bản: '{text}'")
             print(f"  Dự đoán cuối cùng: {prediction} ({label_text})")
             print(f"  Xác suất trung bình (Lớp 0, Lớp 1): {probs}")
