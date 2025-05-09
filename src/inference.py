@@ -2,7 +2,7 @@ import os
 import torch
 import traceback
 from peft import PeftModel
-from src.utils import check_compute_dtype
+from utils.utils import check_compute_dtype
 from transformers import AutoTokenizer, BitsAndBytesConfig, AutoModelForSequenceClassification
 from config.log_config import logger
 import numpy as np
@@ -11,6 +11,7 @@ def load_model(
         model_dir: str,
         model_name: str,
         cache_dir: str = './pretrained_models',
+        use_fl32: bool = True,
         use_4bit_quantization: bool = False,
     ):
     """
@@ -40,9 +41,11 @@ def load_model(
                 logger.warning(f"{os.path.basename(__file__)}: Đã thêm pad_token vào tokenizer từ {model_dir}")
 
         logger.info(f"{os.path.basename(__file__)}: Đã tải Tokenizer từ {model_dir}")
-
-        compute_dtype = check_compute_dtype()
-
+        if use_fl32:
+            compute_dtype = torch.float32
+        else:
+            compute_dtype = check_compute_dtype()
+        logger.info(f"{os.path.basename(__file__)}: Đã thiết lập compute_dtype={compute_dtype}")
         bnb_config = None
         model_load_kwargs = {
             'cache_dir': cache_dir,
@@ -129,7 +132,7 @@ def predict_single_model(text: str, model, tokenizer, max_length: int = 512):
         return None
     
 
-def ensemble_predict(model_dirs: list[str], base_model_names: list[str], texts: list[str], max_length: int = 512, use_4bit_quantization: bool = True):
+def ensemble_predict(model_dirs: list[str], base_model_names: list[str], texts: list[str], max_length: int = 512, use_fl32: bool = True, use_4bit_quantization: bool = True):
     """
     Perform predictions using Ensemble (average probability) technique on multiple models.
 
@@ -153,7 +156,9 @@ def ensemble_predict(model_dirs: list[str], base_model_names: list[str], texts: 
         model, tokenizer = load_model(
             model_dir=os.path.join(os.getcwd(), model_dir),
             model_name=base_name,
-            use_4bit_quantization=use_4bit_quantization)
+            use_4bit_quantization=use_4bit_quantization,
+            use_fl32=use_fl32
+        )
         if model and tokenizer:
             loaded_models.append((model, tokenizer, base_name)) # Lưu cả tên base model để dễ debug
         else:
@@ -201,7 +206,8 @@ if __name__ == "__main__":
         base_model_names=['distilbert-base-uncased', 'microsoft/deberta-v3-large'],
         texts=example_data,
         max_length=512,
-        use_4bit_quantization=False
+        use_4bit_quantization=False,
+        use_fl32=True
     )
     print("\n--- Kết quả dự đoán Ensemble ---")
     if predictions:

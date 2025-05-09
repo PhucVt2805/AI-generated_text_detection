@@ -1,5 +1,7 @@
+bs4
 peft
 numpy
+dotenv
 datasets
 protobuf
 tiktoken

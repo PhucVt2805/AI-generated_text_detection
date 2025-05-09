@@ -6,7 +6,7 @@ import numpy as np
 from datasets import Dataset, ClassLabel, load_dataset
 from peft import LoraConfig, get_peft_model
 from sklearn.metrics import f1_score, accuracy_score
-from src.utils import check_compute_dtype
+from utils.utils import check_compute_dtype
 from transformers import AutoTokenizer, BitsAndBytesConfig, AutoModelForSequenceClassification, TrainingArguments, Trainer
 import traceback
 
@@ -87,6 +87,7 @@ def train(
         pretrained_model_name_or_path: str,
         train_datasets,
         val_datasets,
+        use_fl32: bool = False,
         cache_dir: str = './pretrained_models',
         output_dir: str = './results',
         use_4bit_quantization: bool = False,
@@ -110,8 +111,12 @@ def train(
 
     Args:
         pretrained_model_name_or_path (str): Path or name of the pretrained model
-        data_path (str): Path to the data file (CSV, JSON, etc.) containing the data with columns=[data, label].
+        train_datasets (Dataset): Training dataset.
+        val_datasets (Dataset): Validation dataset.
+        use_fl32 (bool, optional): Whether to use float32 for computation. Default is False.
+        cache_dir (str): Directory to cache the pretrained model.
         output_dir (str): Directory to save the training results (checkpoint, final model).
+        use_4bit_quantization (bool, optional): Whether to use 4-bit quantization. Default is True.
         num_train_epochs (int, optional): Number of training epochs. Default is 3.
         batch_size (int, optional): Batch size for training and evaluation. Default is 8.
         learning_rate (float, optional): Learning rate for the optimizer. Default is 5e-5.
@@ -121,7 +126,6 @@ def train(
         lora_dropout (float, optional): LoRA dropout rate. Default is 0.05.
         use_4bit_quantization (bool, optional): Whether to use 4-bit quantization. Default is True.
         gradient_accumulation_steps (int, optional): Number of steps for gradient accumulation. Default is 1.
-        use_mixed_precision (bool, optional): Whether to use mixed precision training. Default is True.
         use_gradient_checkpointing (bool, optional): Whether to use gradient checkpointing. Default is False.
         num_labels (int, optional): Number of labels for the classification task. Default is 2.
 
@@ -133,19 +137,17 @@ def train(
     output_dir = os.path.join(os.getcwd(), output_dir)
 
     # 1. Choose the dtype that matches your hardware
-    compute_dtype = check_compute_dtype()
-    if compute_dtype == torch.float32:
-        mixed_precision = "no"
-        logger.info(f'{os.path.basename(__file__)}: Không sử dụng mixed precision')
-    elif compute_dtype == torch.float16:
-        mixed_precision = "fp16"
-        logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là fp16')
-    elif compute_dtype == torch.bfloat16:
-        mixed_precision = "bf16"
-        logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là bf16')
-    else:
-        mixed_precision = "no" # Trường hợp mặc định nếu không xác định được
-        logger.info(f'{os.path.basename(__file__)}: Không hỗ trợ mixed precision cho {compute_dtype}')
+    compute_dtype = torch.float32
+    mixed_precision = "no"
+    logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là no')
+    if not use_fl32:
+        compute_dtype = check_compute_dtype()
+        if compute_dtype == torch.float16:
+            mixed_precision = "fp16"
+            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là fp16')
+        elif compute_dtype == torch.bfloat16:
+            mixed_precision = "bf16"
+            logger.info(f'{os.path.basename(__file__)}: Đã thiết lập mixed precision là bf16')
 
 
     # 2. Setup tokenizer

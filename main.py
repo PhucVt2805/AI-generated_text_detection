@@ -38,7 +38,8 @@ def main(data_path):
                 output_dir=model_output_dir,
                 num_train_epochs=1,
                 batch_size=2,
-                use_4bit_quantization=False
+                use_4bit_quantization=False,
+                use_fl32=False
             )
 
             if path_model:
@@ -76,7 +77,8 @@ def main(data_path):
         base_model_names=ensemble_base_model_names_mapped,
         texts=texts_to_predict,
         max_length=512,
-        use_4bit_quantization=False
+        use_4bit_quantization=False,
+        use_fl32=True
     )
 
     print("\n--- Kết quả dự đoán Ensemble ---\n")
